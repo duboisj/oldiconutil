@@ -1,3 +1,15 @@
+Modified oldiconutil!!
+======================
+- This verison has been modified from the original such that: 
+  1.) It does nothing to create compatability on 10.5; and
+  2.) The _only_ thing it does is take a .icns file created 
+      with a modern (e.g., 10.7.5 / 10.8) iconutil from a 
+      .iconset folder and make the 128x128 icon in that .icns
+      compatible with 10.6.
+
+
+
+
 oldiconutil
 ===========
 
