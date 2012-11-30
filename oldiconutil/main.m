@@ -7,7 +7,7 @@
 //
 
 #import <Cocoa/Cocoa.h>
-
+#import <Accelerate/Accelerate.h>
 
 #define JUST_PASS_THROUGH		0
 #define FILTER_TOC_OUT			1
@@ -102,8 +102,7 @@ int main(int argc, const char * argv[])
 		}
 	}
 
-	@autoreleasepool
-	{
+	@autoreleasepool {
 		NSString		*	inputPath = [NSString stringWithUTF8String: argv[nameArgumentPosition]];
 		NSString		*	outputPath = convertInPlace ? inputPath : [[inputPath stringByDeletingPathExtension] stringByAppendingString: @"_10_5.icns"];
 		BOOL				isDirectory = NO;
@@ -150,7 +149,6 @@ int main(int argc, const char * argv[])
 				else
 #endif
 				{
-					[outputData appendBytes: blockType length: 4];	// Copy the type.
 					uint32_t	blockSize = NSSwapInt( *(uint32_t*)(theBytes +currOffs) );
 					currOffs += 4;
 					NSData	*	currBlockData = [NSData dataWithBytes: theBytes +currOffs length: blockSize -8];
@@ -158,34 +156,158 @@ int main(int argc, const char * argv[])
 					uint32_t	startLong = *(uint32_t*)[currBlockData bytes];
 					BOOL		shouldConvert = (startLong == 0x474E5089);	// PNG data starts with 'âPNG'.
 					
-					if( !listOnly )
-					{
-						if( !shouldConvert || strcmp(blockType,"ic08") == 0 || strcmp(blockType,"ic10") == 0
-						   || strcmp(blockType,"ic13") == 0 || strcmp(blockType,"ic09") == 0 || strcmp(blockType,"ic12") == 0
-						   || strcmp(blockType,"ic07") == 0 || strcmp(blockType,"ic11") == 0 || strcmp(blockType,"ic14") == 0 )
-							;
-						else
-							shouldConvert = NO;
-					}
+                    if(!strcmp(blockType, "ic07"))
+                        shouldConvert = YES;
+                    else
+                        shouldConvert = NO;
+
 #if JUST_PASS_THROUGH
-					shouldConvert = NO;
+
 #endif
-					
+
+                    if(!shouldConvert || strcmp(blockType, "ic07"))
+                        [outputData appendBytes: blockType length: 4];	// Copy the type.
+
 					if( shouldConvert )
 					{
-						if( !listOnly )
-						{
-							printf( "\tConverting PNG to %s\n", [destCompression UTF8String] );
-							
-							NSBitmapImageRep	*	theImage = [[NSBitmapImageRep alloc] initWithData: currBlockData];
-							NSData				*	jp2Data = [theImage representationUsingType: NSJPEG2000FileType properties:
-								[NSDictionary dictionaryWithObject: jpegCompressionObj forKey:NSImageCompressionFactor]];
-							uint32_t				newSize = NSSwapInt( (uint32_t) [jp2Data length] + 8 );
-							[outputData appendBytes: &newSize length: 4];	// Write size.
-							[outputData appendData: jp2Data];
-						}
-						else
-							printf( "\tData is PNG\n" );
+                        if( !listOnly)
+                        {
+                            if( !strcmp(blockType, "ic07"))
+                            {
+                                printf("Doing special ic07 block processing.\n");
+
+                                NSBitmapImageRep	*	theImage = [[NSBitmapImageRep alloc] initWithData: currBlockData];
+                            
+                                NSData				*	jp2Data;
+
+                                IconFamilyHandle iconFamily = (IconFamilyHandle)NewHandle(0);
+                                if (!iconFamily)
+                                {
+                                    NSLog(@"Couldn't allocate IconFamily handle\n");
+                                    goto error;
+                                }
+
+                                [NSGraphicsContext saveGraphicsState];
+                                    
+                                Handle handle = NULL;
+                                NSBitmapImageRep *bitmap = nil;
+
+                                NSInteger bitsPerSample = [theImage bitsPerSample];
+
+                                NSInteger width = [theImage pixelsWide];
+                                NSInteger height = [theImage pixelsHigh];
+                                NSInteger bytesPerPixel = 4;
+                                NSInteger bytesPerRow = width * bytesPerPixel;
+
+                                handle = NewHandle(height * bytesPerRow);
+
+                                if (!handle)
+                                {
+                                    NSLog(@"Couldn't allocate bitamp handle of %d rows of %d bytes\n", height, bytesPerRow);
+                                    goto error;
+                                }
+
+                                bitmap = [[NSBitmapImageRep alloc] initWithBitmapDataPlanes:(unsigned char**)handle
+                                                                                 pixelsWide:width
+                                                                                 pixelsHigh:[theImage pixelsHigh]
+                                                                              bitsPerSample:bitsPerSample
+                                                                            samplesPerPixel:bytesPerPixel
+                                                                                   hasAlpha:YES
+                                                                                   isPlanar:NO
+                                                                             colorSpaceName:NSCalibratedRGBColorSpace
+                                                                               bitmapFormat:NSAlphaFirstBitmapFormat
+                                                                                bytesPerRow:bytesPerRow
+                                                                               bitsPerPixel:bytesPerPixel * 8];
+                            
+
+                                if (!bitmap)
+                                {
+                                    NSLog(@"Couldn't create bitmap image rep\n");
+                                    goto error;
+                                }
+                            
+                                NSGraphicsContext* bitmapContext = [NSGraphicsContext graphicsContextWithBitmapImageRep:bitmap];
+                                if (!bitmapContext)
+                                {
+                                    NSLog(@"Couldn't create bitmap graphics context\n");
+                                    goto error;
+                                }
+            
+                                [NSGraphicsContext setCurrentContext:bitmapContext];
+                                [theImage draw];
+
+                                vImage_Buffer buffer;
+                                buffer.data     = *handle;
+                                buffer.width    = width;
+                                buffer.height   = height;
+                                buffer.rowBytes = bytesPerRow;
+                                vImageUnpremultiplyData_ARGB8888(&buffer, &buffer, 0);
+
+                                printf("Working with an image of h: %d, w: %d\n",
+                                       width, height);
+
+                                SetIconFamilyData(iconFamily, kIconServices128PixelDataARGB, handle);
+
+                                [NSGraphicsContext restoreGraphicsState];                            
+
+                                Size iconFamilySize = GetHandleSize((Handle)iconFamily) - 8;
+
+                                if (iconFamilySize)
+                                {
+                                    printf("Length of iconFamilySize is : %d -- our len is %d\n",
+                                           GetHandleSize((Handle)iconFamily),
+                                           iconFamilySize);
+
+                                    char *p = (char*) *iconFamily;
+
+                                    p += 8;
+
+                                    if( strcmp(p,"TOC ") == 0 )
+                                    {
+                                        p += 4;
+                                        uint32_t	blockSize = NSSwapInt( *(uint32_t*)(p) );
+                                        printf( "\tSkipping %d bytes in the ic07 icon header.\n", blockSize );
+                                        p += blockSize -4;
+
+                                        iconFamilySize = GetHandleSize((Handle)iconFamily) - (p - ((char*) *iconFamily));
+                                    }
+
+                                    printf("iconFamilySize : %d\n", iconFamilySize);
+
+                                    jp2Data = [NSData dataWithBytesNoCopy:p length:(iconFamilySize) freeWhenDone:NO];
+
+                                    if(!jp2Data)
+                                    {
+                                        printf("Failed to create data object.\n");
+                                        goto error;
+                                    }
+                                }
+                                else
+                                {
+                                    printf("handle size was zero.\n");
+                                    goto error;
+                                }
+                            
+
+                                [outputData appendData: jp2Data];
+
+                                NSError* error = nil;
+                                BOOL result = [jp2Data writeToFile:@"/Users/duboisj/tmp/experimentalIcon" options:NSAtomicWrite error:&error];
+                                if (!result)
+                                    printf("Failed to write to secondary file.\n");
+
+                                NSData *rawData = [NSData dataWithBytesNoCopy:*iconFamily length:GetHandleSize((Handle)iconFamily) freeWhenDone:NO];
+
+                                result = [rawData writeToFile:@"/Users/duboisj/tmp/rawicon.icns" options:NSAtomicWrite error:&error];
+                                if (!result)
+                                    printf("Failed to write to raw icon file.\n");
+
+                                DisposeHandle((Handle)iconFamily);
+
+                            }
+                            else
+                                printf( "\tNot of type ic07: not going to convert this one.\n");
+                        }
 					}
 					else
 					{
@@ -216,5 +338,9 @@ int main(int argc, const char * argv[])
 		}
 	}
     return 0;
+
+ error:
+    printf("Well, darn.  Something went wrong.  Bailing out entirely.\n");
+    return 1;
 }
 
